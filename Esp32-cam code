@@ -144,7 +144,8 @@ void publishSensorData() {
   payload += "\"light\":" + String(ldrVal) + ",";
   payload += "\"temperature\":" + String(temperature, 1) + ",";
   payload += "\"humidity\":" + String(humidity, 1) + ",";
-  payload += "\"relays\":" + String(relayState);
+  payload += "\"relays\":" + String(relayState) + ",";
+  payload += "\"ble_connected\":" + String(isConnected ? "true" : "false");
   payload += "}";
 
   mqttClient.publish(mqtt_sensor_topic, payload.c_str());
@@ -159,14 +160,18 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SmartMushroom Control Hub</title>
   <style>
-    :root { --bg: #0f172a; --card: #1e293b; --accent: #10b981; --text: #f8fafc; --muted: #94a3b8; }
+    :root { --bg: #0f172a; --card: #1e293b; --accent: #10b981; --text: #f8fafc; --muted: #94a3b8; --danger: #ef4444; }
     body { font-family: system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; text-align: center; }
     .container { max-width: 650px; margin: 0 auto; }
-    h1 { font-size: 1.8rem; color: var(--accent); }
+    h1 { font-size: 1.8rem; color: var(--accent); margin-bottom: 5px; }
+    .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: bold; margin-bottom: 20px; }
+    .status-badge.connected { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; }
+    .status-badge.disconnected { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin: 20px 0; }
     .card { background: var(--card); padding: 18px; border-radius: 12px; border: 1px solid #334155; }
     .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; }
     .val { font-size: 1.4rem; font-weight: bold; margin-top: 6px; color: #38bdf8; }
+    .source-tag { font-size: 0.7rem; margin-top: 4px; color: var(--muted); }
     .relays { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 15px; }
     .btn { padding: 10px 16px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; background: #334155; color: white; }
     .btn.active { background: var(--accent); color: #000; }
@@ -181,6 +186,19 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
         document.getElementById('ldr').innerText = d.ldr;
         document.getElementById('temp').innerText = d.tmp.toFixed(1) + ' °C';
         document.getElementById('hum').innerText = d.hum.toFixed(1) + ' %';
+        
+        let bleBadge = document.getElementById('bleStatus');
+        let srcTag = document.getElementById('tempSrc');
+        if (d.ble) {
+          bleBadge.className = 'status-badge connected';
+          bleBadge.innerText = 'SHT40 BLE: CONNECTED';
+          srcTag.innerText = 'Source: Sensirion SHT40';
+        } else {
+          bleBadge.className = 'status-badge disconnected';
+          bleBadge.innerText = 'SHT40 BLE: DISCONNECTED';
+          srcTag.innerText = 'Source: Serial Fallback';
+        }
+
         for (let i = 0; i < 5; i++) {
           let btn = document.getElementById('r' + (i + 1));
           if (d.rly & (1 << i)) {
@@ -205,12 +223,20 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
 <body>
   <div class="container">
     <h1>SmartMushroom Hub</h1>
+    <div id="bleStatus" class="status-badge disconnected">SHT40 BLE: DISCONNECTED</div>
     <div class="grid">
       <div class="card"><div class="label">CO2 Level</div><div class="val" id="co2">--</div></div>
       <div class="card"><div class="label">Soil Moisture</div><div class="val" id="mst">--</div></div>
       <div class="card"><div class="label">Light Level</div><div class="val" id="ldr">--</div></div>
-      <div class="card"><div class="label">Temperature</div><div class="val" id="temp">--</div></div>
-      <div class="card"><div class="label">Humidity</div><div class="val" id="hum">--</div></div>
+      <div class="card">
+        <div class="label">Temperature</div>
+        <div class="val" id="temp">--</div>
+        <div class="source-tag" id="tempSrc">--</div>
+      </div>
+      <div class="card">
+        <div class="label">Humidity</div>
+        <div class="val" id="hum">--</div>
+      </div>
     </div>
     <div class="card">
       <div class="label">Relay Control</div>
@@ -236,7 +262,8 @@ void handleReadData() {
   json += "\"ldr\":" + String(ldrVal) + ",";
   json += "\"tmp\":" + String(temperature) + ",";
   json += "\"hum\":" + String(humidity) + ",";
-  json += "\"rly\":" + String(relayState);
+  json += "\"rly\":" + String(relayState) + ",";
+  json += "\"ble\":" + String(isConnected ? "true" : "false");
   json += "}";
   server.send(200, "application/json", json);
 }
@@ -278,7 +305,7 @@ void processSerialInput() {
 }
 
 void setup() {
-  // Use Hardware Serial (U0RX / U0TX) at 115200 baud
+  // Hardware Serial (U0RX / U0TX)
   Serial.begin(115200);
 
   WiFi.begin(ssid, password);
@@ -325,7 +352,10 @@ void loop() {
     if (pClient != nullptr && pClient->isConnected()) {
       float t = bytesToFloat(pTempChar->readValue());
       float h = bytesToFloat(pHumChar->readValue());
-      if (!isnan(t) && !isnan(h)) { temperature = t; humidity = h; }
+      if (!isnan(t) && !isnan(h)) { 
+        temperature = t; 
+        humidity = h; 
+      }
     } else {
       isConnected = false;
       BLEDevice::getScan()->start(5, false);
